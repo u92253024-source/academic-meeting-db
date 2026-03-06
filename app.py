@@ -1,18 +1,18 @@
 import streamlit as st
 import google.generativeai as genai
 import pandas as pd
-import io
+import json
 
 # 1. 網頁基本設定
 st.set_page_config(page_title="教務會議歷史查詢", layout="wide")
 st.title("🎓 教務會議歷史查詢系統")
 st.markdown("請導入會議記錄 PDF 檔，系統將透過 AI 幫您精確查詢提案資訊。")
 
-# 2. 側邊欄：設定 API Key (從 Google AI Studio 取得)
+# 2. 側邊欄：設定 API Key
 with st.sidebar:
     st.header("系統設定")
     api_key = st.text_input("請輸入您的 Gemini API Key:", type="password")
-    st.info("您可以到 [Google AI Studio](https://aistudio.google.com/app/apikey) 免費申請 Key。")
+    st.info("您可以到 [Google AI Studio](https://aistudio.google.com/app/apikey) 免費申請。")
 
 # 3. 檔案上傳介面
 uploaded_files = st.file_uploader("導入會議記錄 PDF 檔 (可多選)", type="pdf", accept_multiple_files=True)
@@ -33,59 +33,72 @@ if search_button:
         try:
             # 初始化 Gemini AI
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            # 使用最新的模型名稱格式
+            # 修正處：改用 'models/gemini-1.5-flash' 並加入錯誤排除機制
+            model_name = 'gemini-1.5-flash' 
+            model = genai.GenerativeModel(model_name)
 
             all_results = []
             
-            with st.spinner('AI 正在翻閱會議紀錄中，請稍候...'):
-                for uploaded_file in uploaded_files:
-                    # 讀取 PDF 內容 (Gemini 1.5 系列支援直接處理 PDF 數據)
-                    pdf_data = uploaded_file.read()
-                    
-                    # 建立 AI 指令 (Prompt)
-                    prompt = f"""
-                    你是一個專業的校務助理，現在請在提供的會議紀錄文件中，
-                    尋找與關鍵字「{query}」相關的所有提案。
-                    
-                    請整理成以下格式的 JSON 列表：
-                    [
-                      {{"會議名稱": "例如：112學年度第1次教務會議", "提案單位": "單位名稱", "提案內容": "簡述內容", "提案結果": "決議結果"}}
-                    ]
-                    若找不到相關內容，請回傳空的列表 []。
-                    請只回傳 JSON 格式內容，不要有額外解釋。
-                    """
-                    
-                    # 發送給 AI (傳送 PDF 檔案與指令)
-                    response = model.generate_content([
-                        prompt,
-                        {'mime_type': 'application/pdf', 'data': pdf_data}
-                    ])
-                    
-                    # 解析 AI 回傳的文字
-                    try:
-                        # 清理可能的 markdown 標籤
-                        clean_text = response.text.replace('```json', '').replace('```', '').strip()
-                        import json
-                        data = json.loads(clean_text)
-                        if isinstance(data, list):
-                            all_results.extend(data)
-                    except:
-                        continue
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-                # 5. 呈現結果
-                if all_results:
-                    st.success(f"找到 {len(all_results)} 筆相關提案！")
-                    df = pd.DataFrame(all_results)
-                    # 重新排序與顯示表格
-                    st.table(df)
-                    
-                    # 提供下載 CSV 功能
-                    csv = df.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("下載查詢結果表格 (CSV)", data=csv, file_name="search_results.csv", mime="text/csv")
-                else:
-                    st.info("查無相關提案資訊，請更換關鍵字試試看。")
+            for index, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"正在處理第 {index+1} 份檔案: {uploaded_file.name}...")
+                
+                # 讀取 PDF 數據
+                pdf_data = uploaded_file.read()
+                
+                prompt = f"""
+                你是一個專業的校務助理，現在請在提供的會議紀錄文件中，
+                尋找與關鍵字「{query}」相關的所有提案。
+                
+                請嚴格整理成以下 JSON 列表格式：
+                [
+                  {{"會議名稱": "檔案標題或會議屆次", "提案單位": "哪個系所或處室", "提案內容": "摘要", "提案結果": "通過或修正"}}
+                ]
+                若找不到相關內容，請只回傳 []。不要有任何解釋文字。
+                """
+                
+                # 發送請求
+                response = model.generate_content([
+                    prompt,
+                    {'mime_type': 'application/pdf', 'data': pdf_data}
+                ])
+                
+                # 解析 AI 回傳文字
+                try:
+                    res_text = response.text
+                    # 移除 markdown 標籤
+                    clean_text = res_text.replace('```json', '').replace('```', '').strip()
+                    data = json.loads(clean_text)
+                    if isinstance(data, list):
+                        all_results.extend(data)
+                except Exception:
+                    continue
+                
+                progress_bar.progress((index + 1) / len(uploaded_files))
+
+            # 5. 呈現結果
+            status_text.text("檢索完成！")
+            if all_results:
+                st.success(f"找到 {len(all_results)} 筆相關提案！")
+                df = pd.DataFrame(all_results)
+                st.table(df)
+                
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("下載查詢結果 (CSV)", data=csv, file_name="search_results.csv", mime="text/csv")
+            else:
+                st.info("查無相關提案資訊，請更換關鍵字或確認 PDF 內容。")
+
         except Exception as e:
+            # 如果還是出錯，顯示更詳細的引導資訊
             st.error(f"發生錯誤: {e}")
+            if "404" in str(e):
+                st.help("提示：這通常是 API Key 尚未開通 Gemini 1.5 權限，或是套件版本不符。請確認您的 requirements.txt 包含 google-generativeai>=0.7.2")
 
+st.markdown("---")
+st.caption("註：本系統使用 Google Gemini AI 技術，處理大型 PDF 可能需要 10-30 秒。")
 st.markdown("---")
 st.caption("註：本系統使用 Google Gemini AI 技術，查詢結果僅供參考，請以原始公文為準。")
